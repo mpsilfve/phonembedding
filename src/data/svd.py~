@@ -1,0 +1,3 @@
+def buildmatrix(data):
+    for wf, _, _ in data:
+        
