@@ -42,12 +42,11 @@ def readdata(fn,lan):
     cencoder = {x[1]:i for i, x in enumerate(charcounts)}
 
     for i, d in enumerate(data):
-        wf, lemma, tags = d
+        lemma, wf, tags = d
         wf = [encode(c,cencoder) for c in WB + wf + WB]
         tags = [encode(t,tagencoder) for t in tags.split(',')]
         lemma = [encode(c,cencoder) for c in WB + lemma + WB]
-        data[i] = (wf,lemma,tags)
-
+        data[i] = (lemma,wf,tags)
     embedchars = set([cencoder[c] for count,c in charcounts if count > MINCHAROCC])
     return data, cencoder, tagencoder, embedchars
             

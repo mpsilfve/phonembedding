@@ -7,7 +7,7 @@ from svd import getsvd
 from w2v import getw2v
 from correlation import getsimmatrix, correlation
 from features import getphonfeatures
-from rnn import initmodel,encode,decode,update, train
+from rnn import train
 
 seed(42)
 np.random.seed(43)
@@ -15,6 +15,9 @@ np.random.seed(43)
 # To test 
 N = 20
 P = 0.99
+
+allembeddings = {METHOD:{LAN:None for LAN in ["FI","ES","TUR"]}
+                 for METHOD in ["w2v","svd","rnn"]}
 
 def confidenceival(a):
     return st.t.interval(P, len(a)-1, loc=np.mean(a), scale=st.sem(a))
@@ -27,15 +30,31 @@ def matshuf(m):
     np.random.shuffle(res)
     return res
 
-def getsvdembs(data,cencoder,embchars,cdecoder):
-    svdembedding = getsvd(data,cencoder)
-    svdembeddings = [truncate(svdembedding,n) for n in [5,15,30]]
-    return svdembeddings
+def getsvdembs(data,cencoder,embchars,tencoder,cdecoder,tdecoder,lan):
+    if allembeddings["svd"][lan] == None:
+        print("Training SVD embeddings for %s" % lan)
+        svdembedding = getsvd(data,cencoder)
+        svdembeddings = [truncate(svdembedding,n) for n in [5,15,30]]
+        allembeddings["svd"][lan] = svdembeddings
+    return allembeddings["svd"][lan]
 
-def getw2vembs(data,cencoder,embchars,cdecoder):
-    return [getw2v(data,embchars,5,cdecoder),
-            getw2v(data,embchars,15,cdecoder),
-            getw2v(data,embchars,30,cdecoder)]
+def getw2vembs(data,cencoder,embchars,tencoder,cdecoder,tdecoder,lan):
+    if allembeddings["w2v"][lan] == None:
+        print("Training W2V embeddings for %s" % lan)
+        allembeddings["w2v"][lan] = [getw2v(data,embchars,5,cdecoder),
+                                       getw2v(data,embchars,15,cdecoder),
+                                       getw2v(data,embchars,30,cdecoder)]
+    return allembeddings["w2v"][lan]
+
+def getrnnembs(data,cencoder,embchars,tencoder,cdecoder,tdecoder,lan):
+    if allembeddings["rnn"][lan] == None:
+        print("Training RNN embeddings for %s" % lan)
+        embs = []
+        for dim in [5,15,30]:
+            char_embedding = train(data,cencoder,cdecoder,tencoder,tdecoder,dim)
+            embs.append(char_embedding)
+        allembeddings["rnn"][lan] = embs
+    return allembeddings["rnn"][lan]
 
 def checkr(ival,r):
     if ival[0] < r and ival[1] < r:
@@ -46,6 +65,7 @@ def checkr(ival,r):
 def correlation_experiment(file,lan,embf,name):
     data, cencoder, tencoder, embchars = readdata(file,lan)
     cdecoder = {v:k for k,v in cencoder.items()}
+    tdecoder = {v:k for k,v in tencoder.items()}
     features = getphonfeatures()
     lanfeatures = [np.array(features[cdecoder[f]]) 
                    if cdecoder[f] in features 
@@ -53,7 +73,7 @@ def correlation_experiment(file,lan,embf,name):
 
     featsim = getsimmatrix(lanfeatures,len(cencoder), embchars)
 
-    embeddings = embf(data,cencoder,embchars,cdecoder)
+    embeddings = embf(data,cencoder,embchars,tencoder,cdecoder,tdecoder,lan)
 
     sims = [getsimmatrix(m,len(cencoder), embchars) for m in embeddings]
     rs = [correlation(featsim,sims[i])[0] for i in [0,1,2]]
@@ -84,22 +104,16 @@ if __name__=="__main__":
     print("1. CORRELATION EXPERIMENTS")
     print("--------------------------")
     print()
-#    correlation_experiment("../data/finnish","FI",getsvdembs,"SVD")
-#    correlation_experiment("../data/turkish","TUR",getsvdembs,"SVD")
-#    correlation_experiment("../data/spanish","ES",getsvdembs,"SVD")
+    correlation_experiment("../data/finnish","FI",getsvdembs,"SVD")
+    correlation_experiment("../data/turkish","TUR",getsvdembs,"SVD")
+    correlation_experiment("../data/spanish","ES",getsvdembs,"SVD")
+    correlation_experiment("../data/finnish","FI",getw2vembs,"W2V")
+    correlation_experiment("../data/turkish","TUR",getw2vembs,"W2V")
+    correlation_experiment("../data/spanish","ES",getw2vembs,"W2V")
+    correlation_experiment("../data/finnish","FI",getrnnembs,"RNN")
+    correlation_experiment("../data/turkish","TUR",getrnnembs,"RNN")
+    correlation_experiment("../data/spanish","ES",getrnnembs,"RNN")
 
-#    correlation_experiment("../data/finnish","FI",getw2vembs,"W2V")
-#    correlation_experiment("../data/turkish","TUR",getw2vembs,"W2V")
-#    correlation_experiment("../data/spanish","ES",getw2vembs,"W2V")
 
-#    correlation_experiment("../data/finnish","FI",getrnnembs,"RNN")
-#    correlation_experiment("../data/turkish","TUR",getrnnembs,"RNN")
-#    correlation_experiment("../data/spanish","ES",getrnnembs,"RNN")
 
-    data, cencoder, tencoder, embchars = readdata('../data/finnish',"FI")
-    modeld = initmodel(cencoder,tencoder,15)
-    encoded = encode(data[0][1],data[0][2],modeld)
-    train(data,modeld)
-#    for i in range(100):
-#        print(update(data[0][1],data[0][2],data[0][0],modeld))
 

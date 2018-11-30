@@ -1,125 +1,139 @@
-from copy import copy
+from sys import stderr, argv
 
-from torch import FloatTensor, LongTensor, randn, stack, cat
-from torch import max as tmax
-from torch.autograd import Variable
-from torch.nn import Embedding, Sequential, Linear, LogSoftmax, NLLLoss, LSTM, ModuleList
-from torch.optim import Adam
+import dynet as dy
+import random
+import pickle
 
-import numpy as np
+LSTM_NUM_OF_LAYERS = 1
+STATE_SIZE = 32
 
-DTYPE=FloatTensor
-LTYPE=LongTensor
-LSTMDIM=32
-MAXWFLEN=40
-LOSS=NLLLoss()
-LEARNINGRATE=0.001
-BETAS=(0.9,0.9)
-EPOCHS=20
+EPOCHS=10
 
-BD="<#>"
-
-def initmodel(cencoder,tencoder,embdim):
-    cencoder = copy(cencoder)
-    tencoder = copy(tencoder)
-    tencoder[BD] = len(tencoder)
-    cencoder[BD] = len(cencoder)
-    cembedding=Embedding(len(cencoder),embdim)
-    tembedding=Embedding(len(tencoder),embdim)
-    enc = LSTM(input_size=embdim,
-               hidden_size=LSTMDIM,
-               num_layers=1,
-               bidirectional=1).type(DTYPE)
-    ench0 = randn(2, 1, LSTMDIM).type(DTYPE)
-    encc0 = randn(2, 1, LSTMDIM).type(DTYPE)
-
-    dec = LSTM(input_size=2*LSTMDIM+embdim,
-               hidden_size=LSTMDIM,
-               num_layers=1).type(DTYPE)
-    dech0 = randn(2, 1, 2*LSTMDIM+embdim).type(DTYPE)
-    decc0 = randn(2, 1, 2*LSTMDIM+embdim).type(DTYPE)
-
-    pred = Linear(LSTMDIM,len(cencoder)).type(DTYPE)
-    sm = LogSoftmax().type(DTYPE)
-
-    model = ModuleList([cembedding,
-                        tembedding,
-                        enc,
-                        dec,
-                        pred,
-                        sm])
-    optimizer = Adam(model.parameters(),
-                     lr=LEARNINGRATE,
-                     betas=BETAS)
-
-    return {'model':model,
-            'optimizer':optimizer,
-            'cencoder':cencoder,
-            'tencoder':tencoder,
-            'cembedding':cembedding,
-            'tembedding':tembedding,
-            'enc':enc,
-            'ench0':ench0,
-            'encc0':encc0,
-            'dec':dec,
-            'dech0':dech0,
-            'decc0':decc0,
-            'pred':pred,
-            'sm':sm,
-            'embdim':embdim}
-
-def encode(lemma,tags,modeldict):
-    lemma = [modeldict['cencoder'][BD]] + lemma
-    tags = tags + [modeldict['cencoder'][BD]]
-    lemmalen=len(lemma)
-    tagslen=len(tags)
-    lemma = Variable(LTYPE(lemma),requires_grad=0)
-    tags = Variable(LTYPE(tags),requires_grad=0)
-    lemma = modeldict['cembedding'](lemma)
-    tags = modeldict['tembedding'](tags)
+def init(embedding_size,cencoder,tencoder):
+    global model, enc_fwd_lstm, enc_bwd_lstm, dec_lstm, char_lookup, attention_w1,\
+    attention_w2,attention_v,decoder_w,decoder_b,output_lookup, tag_lookup
+    model = dy.Model()
     
-    all = cat([lemma,tags],dim=0)
-    _, finals = modeldict['enc'](all.view(lemmalen+tagslen,1,modeldict['embdim']),
-                                 (Variable(modeldict['ench0'],requires_grad=1),
-                                  Variable(modeldict['encc0'],requires_grad=1)))
-    finalh0, finalc0 = finals
-    return finalc0
+    enc_fwd_lstm = dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, embedding_size, STATE_SIZE, 
+                                  model)
+    enc_bwd_lstm = dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, embedding_size, STATE_SIZE, 
+                                  model)
+    
+    dec_lstm = dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, STATE_SIZE*2+embedding_size, 
+                              STATE_SIZE, model)
+    char_lookup = model.add_lookup_parameters((len(cencoder), embedding_size))
+    tag_lookup = model.add_lookup_parameters((len(tencoder), embedding_size))
+    decoder_w = model.add_parameters( (len(cencoder), STATE_SIZE))
+    decoder_b = model.add_parameters( (len(cencoder)))
 
-def decode(encoded,modeldict,wflen=MAXWFLEN):
-    pchar = modeldict['cencoder'][BD]
-    h = Variable(modeldict['ench0'],requires_grad=1)
-    c = Variable(modeldict['encc0'],requires_grad=1)
-    cdistrs = []
-    chars = []
-    for i in range(min(wflen+1,MAXWFLEN)):
-        pchar = Variable(LTYPE([pchar]),requires_grad=0)
-        pemb = modeldict['cembedding'](pchar)
-        input = cat([pemb,encoded.view(1,2*LSTMDIM)],dim=1)
-        _, states = modeldict['dec'](input,(h,c))
-        h,c = states
-        c = c.view(1,LSTMDIM)
-        cdistr = modeldict['sm'](modeldict['pred'](c))
-        cdistrs.append(cdistr)
-        _, pchar = tmax(cdistr,1)
-        pchar = int(pchar.data.numpy()[0])
-        chars.append(pchar)
-    return cat(cdistrs,dim=0),chars
+def embed_sentence(lemma,tags):
+    return [char_lookup[char] for char in lemma] + [tag_lookup[tag] for tag in tags]
 
-def update(lemma,tags,wf,modeldict):
-    encoded = encode(lemma,tags,modeldict)
-    cdistrs, chars = decode(encoded,modeldict,len(wf))
-    cdistrs = cdistrs[:len(chars)]
-    chars = Variable(LTYPE(chars),requires_grad=0)
-    loss = LOSS(cdistrs,chars)
-    lossval = loss.data[0]
-    loss.backward()
-    modeldict['optimizer'].step()
-    return lossval
 
-def train(data,modeldict):
-    for i in range(EPOCHS):
-        totloss = 0
-        for i, wlt in enumerate(data):
-            wf, lemma, tags = wlt
-            totloss += update(lemma,tags,wf,modeldict)
-            print(i+1," ",len(data)," ",totloss/(i+1))
+def run_lstm(init_state, input_vecs):
+    s = init_state
+
+    out_vectors = []
+    for vector in input_vecs:
+        s = s.add_input(vector)
+        out_vector = s.output()
+        out_vectors.append(out_vector)
+    return out_vectors
+
+
+def encode_sentence(enc_fwd_lstm, enc_bwd_lstm, sentence):
+    sentence_rev = list(reversed(sentence))
+
+    fwd_vectors = run_lstm(enc_fwd_lstm.initial_state(), sentence)
+    bwd_vectors = run_lstm(enc_bwd_lstm.initial_state(), sentence_rev)
+    bwd_vectors = list(reversed(bwd_vectors))
+    vectors = [dy.concatenate(list(p)) for p in zip(fwd_vectors, bwd_vectors)]
+
+    return vectors
+
+
+def decode(dec_lstm, vectors, output,cencoder):
+    w = dy.parameter(decoder_w)
+    b = dy.parameter(decoder_b)
+    encoded = vectors[-1]
+    w1dt = None
+
+    last_output_embeddings = char_lookup[cencoder["#"]]
+    s = dec_lstm.initial_state().add_input(dy.concatenate([dy.vecInput(STATE_SIZE*2), last_output_embeddings]))
+    loss = []
+
+    for char in output:
+        vector = dy.concatenate([encoded,last_output_embeddings])
+        s = s.add_input(vector)
+        out_vector = w * s.output() + b
+        probs = dy.softmax(out_vector)
+        last_output_embeddings = char_lookup[char]
+        loss.append(-dy.log(dy.pick(probs, char)))
+    loss = dy.esum(loss)
+    return loss
+
+
+def generate(lemma, tag, enc_fwd_lstm, enc_bwd_lstm, dec_lstm,cencoder,cdecoder):
+    embedded = embed_sentence(lemma,tag)
+    encoded = encode_sentence(enc_fwd_lstm, enc_bwd_lstm, embedded)
+
+    w = dy.parameter(decoder_w)
+    b = dy.parameter(decoder_b)
+    encoded = encoded[-1]
+    w1dt = None
+
+    last_output_embeddings = char_lookup[cencoder["#"]]
+    s = dec_lstm.initial_state().add_input(dy.concatenate([dy.vecInput(STATE_SIZE * 2), last_output_embeddings]))
+
+    out = ''
+    count_EOS = 0
+    for i in range(len(lemma)*2):
+        if count_EOS == 2: break
+        vector = dy.concatenate([encoded,last_output_embeddings])
+        s = s.add_input(vector)
+        out_vector = w * s.output() + b
+        probs = dy.softmax(out_vector).vec_value()
+        next_char = probs.index(max(probs))
+        last_output_embeddings = char_lookup[next_char]
+        if cdecoder[next_char] == "#":
+            count_EOS += 1
+            continue
+
+        out += cdecoder[next_char]
+    return out
+
+
+def get_loss(lemma, tags, wf, enc_fwd_lstm, enc_bwd_lstm, dec_lstm,cencoder):
+    dy.renew_cg()
+    embedded = embed_sentence(lemma,tags)
+    encoded = encode_sentence(enc_fwd_lstm, enc_bwd_lstm, embedded)
+    return decode(dec_lstm, encoded, wf,cencoder)
+
+
+def train(data,cencoder,cdecoder,tencoder,tdecoder,embedding_size):
+    init(embedding_size,cencoder,tencoder)
+    trainer = dy.SimpleSGDTrainer(model)
+    for n in range(EPOCHS):
+        totalloss = 0
+        random.shuffle(data)
+        for i, io in enumerate(data):
+            print('EPOCH %u: ex %u of %u\r' % (n+1,i+1,len(data)),end='',file=stderr)
+            lemma,wf,tags = io
+            loss = get_loss(lemma, tags, wf, enc_fwd_lstm, enc_bwd_lstm, dec_lstm,cencoder)
+            totalloss += loss.value()
+            loss.backward()
+            trainer.update()
+        print()
+        print(totalloss/len(data),file=stderr)
+        for lemma,wf,tags in data[:10]:
+            print('input:',''.join([cdecoder[c] for c in lemma]+[tdecoder[c] for c in tags]),
+                  'sys:',generate(lemma,tags, enc_fwd_lstm, enc_bwd_lstm, dec_lstm,
+                                  cencoder,cdecoder),
+                  'gold:',''.join([cdecoder[c] for c in wf]),file=stderr)
+    return char_lookup.rows_as_array(list(cdecoder.keys()))                     
+
+if __name__=='__main__':
+    data = readdata(argv[1])
+    train(model, data)
+    model.save(argv[2])    
+    pickle.dump((int2char,char2int,VOCAB_SIZE),open("%s.obj.pkl" % argv[2],"wb"))
